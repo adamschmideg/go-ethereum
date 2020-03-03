@@ -596,6 +596,8 @@ func TestClientSend(t *testing.T) {
 			}
 			step()
 		}
+		// Cancel should be called earlier but golint complains
+		cancel()
 		wg.Wait()
 	}
 }
