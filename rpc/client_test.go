@@ -568,8 +568,11 @@ func TestClientSend(t *testing.T) {
 		t.Log("\ncancelAt", cancelAt)
 		c := Client{}
 		c.reqInit = make(chan *requestOp)
+		defer close(c.reqInit)
 		c.reqSent = make(chan error)
+		defer close(c.reqSent)
 		c.closing = make(chan struct{})
+		defer close(c.closing)
 		steps := []func(){
 			func() { t.Log("reqInit", <-c.reqInit) },
 			func() { t.Log("reqSent", <-c.reqSent) },
