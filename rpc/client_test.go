@@ -563,6 +563,40 @@ func ipcTestClient(srv *Server, fl *flakeyListener) (*Client, net.Listener) {
 	return client, l
 }
 
+func TestClientSend(t *testing.T) {
+	for cancelAt := 0; cancelAt < 3; cancelAt++ {
+		t.Log("\ncancelAt", cancelAt)
+		c := Client{}
+		c.reqInit = make(chan *requestOp)
+		c.reqSent = make(chan error)
+		c.closing = make(chan struct{})
+		steps := []func(){
+			func() { t.Log("reqInit", <-c.reqInit) },
+			func() { t.Log("reqSent", <-c.reqSent) },
+			func() {},
+		}
+		//c.write = func(ctx context.Context, msg interface{}, b bool) {}
+		op := requestOp{}
+		ctx, cancel := context.WithCancel(context.Background())
+		var wg sync.WaitGroup
+		wg.Add(1)
+		go func() {
+			err := c.send(ctx, &op, "")
+			t.Log("error", err)
+			wg.Done()
+		}()
+		for i, step := range steps {
+			if cancelAt == i {
+				t.Log("cancelling")
+				time.Sleep(5 * time.Millisecond)
+				cancel()
+			}
+			step()
+		}
+		wg.Wait()
+	}
+}
+
 // flakeyListener kills accepted connections after a random timeout.
 type flakeyListener struct {
 	net.Listener
