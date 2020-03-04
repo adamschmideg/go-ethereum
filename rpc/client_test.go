@@ -563,43 +563,40 @@ func ipcTestClient(srv *Server, fl *flakeyListener) (*Client, net.Listener) {
 	return client, l
 }
 
-func TestClientSend(t *testing.T) {
-	for cancelAt := 0; cancelAt < 3; cancelAt++ {
-		t.Log("\ncancelAt", cancelAt)
-		c := Client{}
-		c.reqInit = make(chan *requestOp)
-		defer close(c.reqInit)
-		c.reqSent = make(chan error)
-		defer close(c.reqSent)
-		c.closing = make(chan struct{})
-		defer close(c.closing)
-		steps := []func(){
-			func() { t.Log("reqInit", <-c.reqInit) },
-			func() { t.Log("reqSent", <-c.reqSent) },
-			func() {},
-		}
-		//c.write = func(ctx context.Context, msg interface{}, b bool) {}
-		op := requestOp{}
-		ctx, cancel := context.WithCancel(context.Background())
-		var wg sync.WaitGroup
-		wg.Add(1)
-		go func() {
-			err := c.send(ctx, &op, "")
-			t.Log("error", err)
-			wg.Done()
-		}()
-		for i, step := range steps {
-			if cancelAt == i {
-				t.Log("cancelling")
-				time.Sleep(5 * time.Millisecond)
-				cancel()
-			}
-			step()
-		}
-		// Cancel should be called earlier but golint complains
-		cancel()
-		wg.Wait()
+func cancelAt(t *testing.T, cancelAt int) {
+	c := Client{}
+	c.reqInit = make(chan *requestOp)
+	c.reqSent = make(chan error)
+	c.closing = make(chan struct{})
+	defer close(c.reqInit)
+	defer close(c.reqSent)
+	defer close(c.closing)
+	steps := []func(){
+		func() { <-c.reqInit },
+		func() { <-c.reqSent },
 	}
+	ctx, cancel := context.WithCancel(context.Background())
+	allSteps := append(steps[:cancelAt], cancel)
+	op := requestOp{}
+	var wg sync.WaitGroup
+	wg.Add(1)
+	go func() {
+		err := c.send(ctx, &op, "")
+		t.Log(err)
+		wg.Done()
+	}()
+	for i, step := range allSteps {
+		step()
+		if i == cancelAt {
+			break
+		}
+	}
+	wg.Wait()
+}
+
+func TestClientSend(t *testing.T) {
+	cancelAt(t, 0)
+	cancelAt(t, 2)
 }
 
 // flakeyListener kills accepted connections after a random timeout.
