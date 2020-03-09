@@ -522,6 +522,132 @@ func (c *Client) reconnect(ctx context.Context) error {
 	}
 }
 
+type dispatchableClient interface {
+	newClientConn(codec ServerCodec) *clientConn
+	drainRead()
+	read(codec ServerCodec)
+}
+
+type dispatcher struct {
+	close       chan struct{}
+	closing     chan struct{}    // closed when client is quitting
+	didClose    chan struct{}    // closed when client quits
+	reconnected chan ServerCodec // where write/reconnect sends the new connection
+	readOp      chan readOp      // read messages
+	readErr     chan error       // errors from read
+	reqInit     chan *requestOp  // register response IDs, takes write lock
+	reqSent     chan error       // signals write completion, releases write lock
+	reqTimeout  chan *requestOp  // removes response IDs when call timeout expires
+
+	lastOp      *requestOp      // tracks last send operation
+	reqInitLock chan *requestOp // nil while the send lock is held
+	conn        *clientConn
+	reading     bool
+}
+
+func (d *dispatcher) dispatch(codec ServerCodec, c dispatchableClient) {
+	d.reqInitLock = d.reqInit // nil while the send lock is held
+	d.conn = c.newClientConn(codec)
+	d.reading = true
+	defer func() {
+		close(d.closing)
+		if d.reading {
+			d.conn.close(ErrClientQuit, nil)
+			c.drainRead()
+		}
+		close(d.didClose)
+	}()
+
+	// Spawn the initial read loop.
+	go c.read(codec)
+
+	for {
+		select {
+		case <-d.close:
+			d.onClose()
+			return
+
+		// Read path:
+		case op := <-d.readOp:
+			d.onReadOp(op)
+
+		case err := <-d.readErr:
+			d.onReadErr(err)
+
+		case newcodec := <-d.reconnected:
+			d.onReconnected(newcodec, c)
+
+		// Send path:
+		case op := <-d.reqInitLock:
+			d.onReqInitLock(op)
+
+		case err := <-d.reqSent:
+			d.onReqSent(err)
+
+		case op := <-d.reqTimeout:
+			d.onTimeout(op)
+		}
+	}
+}
+
+func (d *dispatcher) onClose() {
+}
+
+func (d *dispatcher) onReadOp(op readOp) {
+	if op.batch {
+		d.conn.handler.handleBatch(op.msgs)
+	} else {
+		d.conn.handler.handleMsg(op.msgs[0])
+	}
+}
+
+func (d *dispatcher) onReadErr(err error) {
+	d.conn.handler.log.Debug("RPC connection read error", "err", err)
+	d.conn.close(err, d.lastOp)
+	d.reading = false
+}
+
+func (d *dispatcher) onReconnected(newcodec ServerCodec, c dispatchableClient) {
+	log.Debug("RPC client reconnected", "reading", d.reading, "conn", newcodec.remoteAddr())
+	if d.reading {
+		// Wait for the previous read loop to exit. This is a rare case which
+		// happens if this loop isn't notified in time after the connection breaks.
+		// In those cases the caller will notice first and reconnect. Closing the
+		// handler terminates all waiting requests (closing op.resp) except for
+		// lastOp, which will be transferred to the new handler.
+		d.conn.close(errClientReconnected, d.lastOp)
+		c.drainRead()
+	}
+	go c.read(newcodec)
+	d.reading = true
+	d.conn = c.newClientConn(newcodec)
+	// Re-register the in-flight request on the new handler
+	// because that's where it will be sent.
+	d.conn.handler.addRequestOp(d.lastOp)
+}
+
+func (d *dispatcher) onReqInitLock(op *requestOp) {
+	// Stop listening for further requests until the current one has been sent.
+	d.reqInitLock = nil
+	d.lastOp = op
+	d.conn.handler.addRequestOp(op)
+}
+
+func (d *dispatcher) onReqSent(err error) {
+	if err != nil {
+		// Remove response handlers for the last send. When the read loop
+		// goes down, it will signal all other current operations.
+		d.conn.handler.removeRequestOp(d.lastOp)
+	}
+	// Let the next request in.
+	d.reqInitLock = d.reqInit
+	d.lastOp = nil
+}
+
+func (d *dispatcher) onTimeout(op *requestOp) {
+	d.conn.handler.removeRequestOp(op)
+}
+
 // dispatch is the main loop of the client.
 // It sends read messages to waiting calls to Call and BatchCall
 // and subscription notifications to registered subscriptions.

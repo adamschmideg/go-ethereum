@@ -49,6 +49,28 @@ func TestClientRequest(t *testing.T) {
 	}
 }
 
+func TestClientRequestIPC(t *testing.T) {
+	server := newTestServer()
+	defer server.Stop()
+	fl := &flakeyListener{
+		maxAcceptDelay: 1 * time.Second,
+		maxKillTimeout: 600 * time.Millisecond,
+	}
+	c, l := ipcTestClient(server, fl)
+	defer c.Close()
+	defer l.Close()
+	client := c
+
+	ctx := context.Background()
+	var resp echoResult
+	if err := client.CallContext(ctx, &resp, "test_echo", "hello", 10, &echoArgs{"world"}); err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(resp, echoResult{"hello", 10, &echoArgs{"world"}}) {
+		t.Errorf("incorrect result %#v", resp)
+	}
+}
+
 func TestClientResponseType(t *testing.T) {
 	server := newTestServer()
 	defer server.Stop()
@@ -578,25 +600,61 @@ func cancelAt(t *testing.T, cancelAt int) {
 	ctx, cancel := context.WithCancel(context.Background())
 	allSteps := append(steps[:cancelAt], cancel)
 	op := requestOp{}
+	op.resp = make(chan *jsonrpcMessage, 1)
 	var wg sync.WaitGroup
 	wg.Add(1)
 	go func() {
-		err := c.send(ctx, &op, "")
+		err := c.CallContext(ctx, nil, "test_foobar")
 		t.Log(err)
 		wg.Done()
 	}()
-	for i, step := range allSteps {
+	for _, step := range allSteps {
 		step()
-		if i == cancelAt {
-			break
-		}
 	}
 	wg.Wait()
 }
 
-func TestClientSend(t *testing.T) {
+func TestCancel(t *testing.T) {
 	cancelAt(t, 0)
 	cancelAt(t, 2)
+}
+
+func TestCancelIPC(t *testing.T) {
+	server := newTestServer()
+	defer server.Stop()
+	fl := &flakeyListener{
+		maxAcceptDelay: 1 * time.Second,
+		maxKillTimeout: 600 * time.Millisecond,
+	}
+	c, l := ipcTestClient(server, fl)
+	defer c.Close()
+	defer l.Close()
+
+	msg, err := c.newMessage("test_echo", "hello")
+	if err != nil {
+		t.Fatal(msg)
+	}
+	steps := []func(){
+		func() { <-c.reqInit },
+		func() { c.readOp <- readOp{[]*jsonrpcMessage{msg}, false} },
+	}
+
+	ctx := context.Background()
+	var resp echoResult
+	var wg sync.WaitGroup
+	wg.Add(1)
+	go func() {
+		if err := c.CallContext(ctx, &resp, "test_echo", "hello", 10, &echoArgs{"world"}); err != nil {
+			t.Fatal(err)
+		}
+		wg.Done()
+	}()
+	for i, step := range steps {
+		fmt.Println("step before", i)
+		step()
+		fmt.Println("step after", i)
+	}
+	wg.Wait()
 }
 
 // flakeyListener kills accepted connections after a random timeout.
