@@ -4,12 +4,6 @@ sudo: false
 jobs:
   allow_failures:
     - stage: test
-      os: linux
-      dist: xenial
-      arch: amd64
-      go: 1.13.x
-      script:
-        - go test -tags=flaky -short github.com/ethereum/go-ethereum/les
 
   include:
     # This builder only tests code linters on latest version of Go
@@ -24,6 +18,13 @@ jobs:
       script:
         - go run build/ci.go lint
 
+    - stage: test
+      os: linux
+      dist: xenial
+      arch: amd64
+      go: 1.13.x
+      script:
+        - go test -tags=flaky github.com/ethereum/go-ethereum/les -run flaky
 
     - stage: build
       os: linux
